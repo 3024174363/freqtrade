@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from freqtrade.data.ashare.models import (
+    INTRADAY_MINUTES,
     SHANGHAI,
     Candle,
     Instrument,
@@ -94,7 +95,7 @@ def parse_time(value: str) -> datetime:
         raise ProviderError("invalid_timestamp") from exc
 
 
-def normalize_candles(rows: list, timeframe: str, factor: int) -> list[Candle]:
+def normalize_candles(rows: list, timeframe: str, factor: float) -> list[Candle]:
     if not rows:
         raise NoDataError("no_data")
     now = now_shanghai()
@@ -110,6 +111,14 @@ def normalize_candles(rows: list, timeframe: str, factor: int) -> list[Candle]:
         if volume is not None and volume < 0:
             raise ProviderError("negative_volume")
         ts = int(stamp.timestamp() * 1000)
+        if timeframe in INTRADAY_MINUTES:
+            complete = stamp <= now
+        elif timeframe == "1w":
+            complete = stamp.isocalendar()[:2] < now.isocalendar()[:2]
+        elif timeframe == "1M":
+            complete = (stamp.year, stamp.month) < (now.year, now.month)
+        else:
+            complete = stamp.date() < now.date()
         result[ts] = Candle(
             timestamp=ts,
             open=op,
@@ -117,7 +126,7 @@ def normalize_candles(rows: list, timeframe: str, factor: int) -> list[Candle]:
             high=high,
             low=low,
             volume=volume * factor if volume is not None else None,
-            complete=stamp <= now if timeframe == "1m" else stamp.date() < now.date(),
+            complete=complete,
         )
     return sorted(result.values(), key=lambda bar: bar.timestamp)
 
@@ -167,7 +176,7 @@ class TencentProvider(ProviderCapabilities):
     name = "tencent"
     enabled = True
     operations = {"quote", "candles"}
-    timeframes = {"1m", "1d"}
+    timeframes = {"1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"}
 
     def __init__(self, http: MarketHTTP):
         self.http = http
@@ -203,13 +212,15 @@ class TencentProvider(ProviderCapabilities):
 
     async def candles(self, instrument: Instrument, timeframe: str, limit: int):
         code = instrument.provider_code
-        if timeframe == "1m":
+        if timeframe in INTRADAY_MINUTES:
             url = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
-            param, field = f"{code},m1,,{limit}", "m1"
+            field = f"m{INTRADAY_MINUTES[timeframe]}"
+            param = f"{code},{field},,{limit}"
         else:
             # Non-fq endpoint: the fq endpoint may return qfqday even without a qfq flag.
             url = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
-            param, field = f"{code},day,,,{limit}", "day"
+            field = {"1d": "day", "1w": "week", "1M": "month"}[timeframe]
+            param = f"{code},{field},,,{limit}"
         response = await self.http.get(self.name, url, {"param": param})
         data = response.json().get("data", {}).get(code, {})
         qt = data.get("qt", {}).get(code, [])
@@ -227,8 +238,8 @@ class TencentProvider(ProviderCapabilities):
 class SinaProvider(ProviderCapabilities):
     name = "sina"
     enabled = True
-    operations = {"quote"}
-    timeframes: set[str] = set()
+    operations = {"quote", "candles"}
+    timeframes = {"5m", "15m", "30m", "1h", "1d"}
 
     def __init__(self, http: MarketHTTP):
         self.http = http
@@ -243,14 +254,45 @@ class SinaProvider(ProviderCapabilities):
         fields = match.group(1).split(",") if match else []
         if len(fields) < 32:
             raise NoDataError("no_data")
+        volume = number(fields[8], optional=True)
+        # Sina SH index snapshots already use lots; SZ index snapshots use
+        # aggregate shares. K-lines use shares for both markets.
+        if volume is not None and instrument.kind == "index" and instrument.exchange == "SZ":
+            volume /= 100
         quote = quote_values(
-            fields[3], fields[2], fields[1], fields[4], fields[5], fields[8], fields[9]
+            fields[3], fields[2], fields[1], fields[4], fields[5], volume, fields[9]
         )
         return (
             instrument.model_copy(update={"name": fields[0]}),
             quote,
             parse_time(f"{fields[30]} {fields[31]}").isoformat(),
         )
+
+    async def candles(self, instrument: Instrument, timeframe: str, limit: int):
+        response = await self.http.get(
+            self.name,
+            "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData",
+            {
+                "symbol": instrument.provider_code,
+                "scale": str(INTRADAY_MINUTES[timeframe]) if timeframe != "1d" else "240",
+                "ma": "no",
+                "datalen": str(limit),
+            },
+        )
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise NoDataError("no_data")
+        rows = [
+            [row["day"], row["open"], row["close"], row["high"], row["low"], row.get("volume")]
+            for row in payload
+        ]
+        # Unlike Sina snapshots, Sina index K-line volumes are aggregate shares;
+        # SH comparisons show the 100:1 ratio. SZ bars can cover a different
+        # index universe, so converting units does not make their volumes equal.
+        factor = 0.01 if instrument.kind == "index" else 1
+        bars = normalize_candles(rows, timeframe, factor)
+        # The endpoint has bar dates, but no independent quote-generation time.
+        return instrument, bars, None
 
 
 class EastmoneyProvider(ProviderCapabilities):
@@ -259,7 +301,7 @@ class EastmoneyProvider(ProviderCapabilities):
     # routing tests, but do not advertise an unverified adapter as a working backup.
     enabled = False
     operations = {"candles"}
-    timeframes = {"1m", "1d"}
+    timeframes = {"1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"}
 
     def __init__(self, http: MarketHTTP):
         self.http = http
@@ -270,7 +312,9 @@ class EastmoneyProvider(ProviderCapabilities):
             "https://push2his.eastmoney.com/api/qt/stock/kline/get",
             {
                 "secid": f"{1 if instrument.exchange == 'SH' else 0}.{instrument.symbol[:6]}",
-                "klt": "1" if timeframe == "1m" else "101",
+                "klt": str(INTRADAY_MINUTES[timeframe])
+                if timeframe in INTRADAY_MINUTES
+                else {"1d": "101", "1w": "102", "1M": "103"}[timeframe],
                 "fqt": "0",
                 "lmt": str(limit),
                 "beg": "0",

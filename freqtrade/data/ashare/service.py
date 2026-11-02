@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from freqtrade.data.ashare.models import (
+    INTRADAY_MINUTES,
     SHANGHAI,
+    TIMEFRAMES,
     CandlesResponse,
     Metadata,
     QuoteResponse,
@@ -28,7 +30,7 @@ from freqtrade.data.ashare.providers import (
 
 
 logger = logging.getLogger(__name__)
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 class MarketUnavailable(Exception):
@@ -100,7 +102,7 @@ class AShareService:
 
     def capabilities(self):
         return {
-            "timeframes": ["1m", "1d"],
+            "timeframes": list(TIMEFRAMES),
             "exchanges": ["SH", "SZ"],
             "kinds": ["stock", "index", "etf"],
             "adjustment": "raw",
@@ -110,11 +112,11 @@ class AShareService:
                     "source": p.name,
                     "enabled": p.enabled,
                     "operations": sorted(p.operations),
-                    "timeframes": sorted(p.timeframes),
+                    "timeframes": [tf for tf in TIMEFRAMES if tf in p.timeframes],
                     "exchanges": sorted(p.exchanges),
                     "kinds": sorted(p.kinds),
                     "adjustments": sorted(p.adjustments),
-                    "reason": None if p.enabled else "当前环境东财 K 线连接被关闭，备用尚未启用",
+                    "reason": None if p.enabled else "当前环境东财 K 线不可用，暂未启用",
                 }
                 for p in self.providers
             ],
@@ -169,15 +171,58 @@ class AShareService:
 
         return await self._single(key, fetch)
 
-    async def quote(self, symbol: str) -> QuoteResponse:
-        return await self._get("quote", symbol)
+    async def quote(self, symbol: str, source: str = "auto") -> QuoteResponse:
+        return await self._get("quote", symbol, source=source)
 
-    async def candles(self, symbol: str, timeframe: str, limit: int) -> CandlesResponse:
-        if timeframe not in {"1m", "1d"} or not 10 <= limit <= 500:
-            raise ValueError("周期仅支持 1m / 1d，K 线数量须为 10～500")
-        return await self._get("candles", symbol, timeframe, limit)
+    async def candles(
+        self, symbol: str, timeframe: str, limit: int, source: str = "auto"
+    ) -> CandlesResponse:
+        if timeframe not in TIMEFRAMES or not 10 <= limit <= 500:
+            raise ValueError("不支持的周期或 K 线数量；数量须为 10～500")
+        return await self._get("candles", symbol, timeframe, limit, source)
 
-    async def _get(self, operation: str, symbol: str, timeframe: str = "", limit: int = 0):
+    def _candidates(self, instrument, operation: str, timeframe: str, source: str):
+        known = {p.name: p for p in self.providers}
+        if source != "auto":
+            if source not in known:
+                raise ValueError("未知数据源")
+            if not known[source].enabled:
+                raise ValueError("该数据源当前不可用，请选择其他来源或自动模式")
+        candidates = [
+            p
+            for p in self.providers
+            if p.enabled
+            and (source == "auto" or p.name == source)
+            and operation in p.operations
+            and (operation != "candles" or timeframe in p.timeframes)
+            and instrument.exchange in p.exchanges
+            and instrument.kind in p.kinds
+            and "raw" in p.adjustments
+        ][:2]
+        if not candidates:
+            raise ValueError("所选数据源不支持当前标的或周期，请切换数据源或周期")
+        return candidates
+
+    @staticmethod
+    def _cached(entry, source: str, *, stale: bool = False):
+        result = entry.value.model_copy(deep=True)
+        result.meta.requested_source = source
+        result.meta.fallback_used = source == "auto" and result.meta.source != "tencent"
+        result.meta.cached = True
+        result.meta.stale = stale
+        result.meta.session = session_label(now_shanghai())
+        if stale:
+            result.meta.warning = "行情更新失败，保留所选来源最近成功数据；请查看行情时间"
+        return result
+
+    async def _get(
+        self,
+        operation: str,
+        symbol: str,
+        timeframe: str = "",
+        limit: int = 0,
+        source: str = "auto",
+    ):
         instrument = instrument_for(symbol)
         instrument = self.directory.get(instrument.symbol, instrument)
         key = (
@@ -190,23 +235,11 @@ class AShareService:
             "raw",
         )
         now = time.monotonic()
-        candidates = [
-            p
-            for p in self.providers
-            if p.enabled
-            and operation in p.operations
-            and (operation != "candles" or timeframe in p.timeframes)
-            and instrument.exchange in p.exchanges
-            and instrument.kind in p.kinds
-            and "raw" in p.adjustments
-        ][:2]
+        candidates = self._candidates(instrument, operation, timeframe, source)
         entries = [self.cache.get((*key, p.name)) for p in candidates]
         for entry in entries:
             if entry and entry.expires > now:
-                result = entry.value.model_copy(deep=True)
-                result.meta.cached = True
-                result.meta.session = session_label(now_shanghai())
-                return result
+                return self._cached(entry, source)
 
         async def fetch():
             failures = []
@@ -228,16 +261,22 @@ class AShareService:
                     clock = now_shanghai()
                     meta = Metadata(
                         source=provider.name,
-                        fallback_used=index > 0,
+                        requested_source=source,
+                        fallback_used=source == "auto" and index > 0,
                         volume_unit=item.volume_unit,
+                        volume_note=(
+                            "指数成交量按供应商统计范围汇总，不同来源数值可能不同"
+                            if item.kind == "index"
+                            else None
+                        ),
                         data_time=data_time,
                         fetched_at=clock.isoformat(),
                         session=session_label(clock),
                         timestamp_convention=(
                             "interval_end"
-                            if timeframe == "1m"
+                            if timeframe in INTRADAY_MINUTES
                             else "trading_date"
-                            if timeframe == "1d"
+                            if timeframe in TIMEFRAMES
                             else "quote_time"
                         ),
                     )
@@ -267,26 +306,30 @@ class AShareService:
                         self.cooldown[health_key] = time.monotonic() + 30
             old = [e for e in entries if e]
             if old:
-                result = max(old, key=lambda e: e.expires).value.model_copy(deep=True)
-                result.meta.cached = True
-                result.meta.stale = True
-                result.meta.warning = "行情更新失败，保留最近成功数据；请查看行情时间"
-                result.meta.session = session_label(now_shanghai())
-                return result
+                return self._cached(max(old, key=lambda e: e.expires), source, stale=True)
             if failures and all(reason == "no_data" for reason in failures):
                 raise MarketUnavailable("上游未返回该标的行情，请核对代码、停牌情况及可用历史范围")
             raise MarketUnavailable("行情源暂时不可用，请稍后刷新")
 
-        return await self._single(key, fetch)
+        # Manual and automatic calls may share provider caches, never in-flight
+        # fallback decisions: a manual Sina request must not inherit Tencent data.
+        return await self._single((*key, source), fetch)
 
     async def _candles_via(self, provider, instrument, timeframe, limit, key):
         from datetime import datetime
 
         today = now_shanghai().date()
+        # An unfinished weekly/monthly row can be dated yesterday and change its
+        # timestamp every trading day. Fetch the full window so it is replaced,
+        # never merged with an earlier snapshot of the same period.
+        if timeframe in {"1w", "1M"}:
+            item, bars, data_time = await provider.candles(instrument, timeframe, limit)
+            return item, bars[-limit:], data_time
         history_key = (*key, provider.name, today.isoformat())
         historical = self.history.get(history_key)
         valid = historical and historical.expires > time.monotonic()
-        request_limit = min(limit, 242 if timeframe == "1m" else 2) if valid else limit
+        day_count = 242 // INTRADAY_MINUTES[timeframe] + 2 if timeframe in INTRADAY_MINUTES else 2
+        request_limit = min(limit, day_count) if valid else limit
         item, bars, data_time = await provider.candles(instrument, timeframe, request_limit)
         if valid:
             merged = {bar.timestamp: bar for bar in [*historical.value, *bars]}

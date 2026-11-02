@@ -8,7 +8,10 @@ from pydantic import BaseModel
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-Timeframe = Literal["1m", "1d"]
+Timeframe = Literal["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"]
+Source = Literal["auto", "tencent", "sina", "eastmoney"]
+TIMEFRAMES: tuple[Timeframe, ...] = ("1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M")
+INTRADAY_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
 
 
 class Instrument(BaseModel):
@@ -72,8 +75,10 @@ class Candle(BaseModel):
 
 class Metadata(BaseModel):
     source: str
+    requested_source: Source = "auto"
     fallback_used: bool = False
     volume_unit: str
+    volume_note: str | None = None
     adjustment: Literal["raw"] = "raw"
     data_time: str | None = None
     fetched_at: str

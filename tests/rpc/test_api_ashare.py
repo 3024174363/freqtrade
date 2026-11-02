@@ -50,8 +50,38 @@ def test_market_failure_is_503_and_bad_parameters_are_422(client):
     )
     assert (
         session.get(
-            "/api/v1/ashare/candles?symbol=600519.SH&timeframe=5m", auth=("test", "test")
+            "/api/v1/ashare/candles?symbol=600519.SH&timeframe=2h", auth=("test", "test")
         ).status_code
         == 422
     )
     service.candles.assert_not_called()
+
+
+@pytest.mark.parametrize("timeframe", ["1m", "5m", "15m", "30m", "1h", "1d", "1w", "1M"])
+def test_timeframes_and_manual_source_are_forwarded(client, timeframe):
+    session, service = client
+    service.candles.side_effect = MarketUnavailable("controlled response")
+    response = session.get(
+        f"/api/v1/ashare/candles?symbol=600519.SH&timeframe={timeframe}&source=sina",
+        auth=("test", "test"),
+    )
+    assert response.status_code == 503
+    service.candles.assert_awaited_once_with("600519.SH", timeframe, 320, source="sina")
+
+
+def test_manual_quote_and_invalid_source(client):
+    session, service = client
+    service.quote.side_effect = MarketUnavailable("controlled response")
+    response = session.get(
+        "/api/v1/ashare/quote?symbol=600519.SH&source=sina", auth=("test", "test")
+    )
+    assert response.status_code == 503
+    service.quote.assert_awaited_once_with("600519.SH", source="sina")
+    service.quote.reset_mock()
+    assert (
+        session.get(
+            "/api/v1/ashare/quote?symbol=600519.SH&source=unknown", auth=("test", "test")
+        ).status_code
+        == 422
+    )
+    service.quote.assert_not_called()

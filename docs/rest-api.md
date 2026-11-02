@@ -99,18 +99,33 @@ All endpoints below use the existing HTTP Basic or JWT authentication:
 ```text
 GET /api/v1/ashare/capabilities
 GET /api/v1/ashare/search?q=000001
-GET /api/v1/ashare/quote?symbol=600519.SH
-GET /api/v1/ashare/candles?symbol=600519.SH&timeframe=1m&limit=320
+GET /api/v1/ashare/quote?symbol=600519.SH&source=sina
+GET /api/v1/ashare/candles?symbol=600519.SH&timeframe=30m&limit=320&source=sina
 ```
 
 Use qualified symbols to distinguish `000001.SH` (Shanghai Composite) from
-`000001.SZ` (Ping An Bank). Supported candle intervals are `1m` and `1d`, with
+`000001.SZ` (Ping An Bank). Supported candle intervals are `1m`, `5m`, `15m`,
+`30m`, `1h`, `1d`, `1w` and `1M`, with
 10 to 500 rows per request. Responses report the actual provider, raw price
 adjustment, volume unit, market timestamp, fetch time, cache status and coverage.
 Stock volume is in shares, ETF volume in fund units, and index volume retains
 the provider's aggregate lot convention. Minute timestamps identify interval ends.
 
-Snapshots try Tencent then Sina; candles currently use Tencent. The Eastmoney
+The optional `source` parameter accepts `auto` (default), `tencent`, `sina`, or
+`eastmoney`. Automatic mode tries Tencent then Sina when the operation and interval
+are supported. Sina candles support `5m`, `15m`, `30m`, `1h` and `1d`; Tencent
+supports all listed intervals. A manual source never falls back to another source
+or returns that source's cache. Unsupported source/interval combinations return 422.
+Metadata distinguishes `requested_source` from the actual `source`; cached responses
+retain the actual provider and adjust fallback status for the requested mode.
+
+Sina index candle volumes are converted from aggregate shares to lots, and Sina
+index snapshot units are mapped separately for Shanghai and Shenzhen. Index
+aggregation scopes can differ between providers even after conversion; responses
+include a `volume_note` for indices. Weekly/monthly windows are refreshed as a whole
+so a moving timestamp cannot duplicate the current period.
+
+The Eastmoney
 candle adapter is disabled until its live endpoints and units can be verified
 in this environment. Bounded in-memory caches, request coalescing, timeouts and
 provider cooldowns limit upstream traffic. Failed refreshes return the last

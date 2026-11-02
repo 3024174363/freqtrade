@@ -1,6 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from freqtrade.data.ashare.models import CandlesResponse, QuoteResponse, SearchResponse
+from freqtrade.data.ashare.models import (
+    CandlesResponse,
+    QuoteResponse,
+    SearchResponse,
+    Source,
+    Timeframe,
+)
 from freqtrade.data.ashare.service import AShareService, MarketUnavailable
 
 
@@ -29,10 +35,12 @@ async def search(
 
 @router.get("/quote", response_model=QuoteResponse)
 async def quote(
-    symbol: str = Query(max_length=12), service: AShareService = Depends(get_ashare_service)
+    symbol: str = Query(max_length=12),
+    source: Source = "auto",
+    service: AShareService = Depends(get_ashare_service),
 ):
     try:
-        return await service.quote(symbol)
+        return await service.quote(symbol, source=source)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except MarketUnavailable as exc:
@@ -42,12 +50,13 @@ async def quote(
 @router.get("/candles", response_model=CandlesResponse)
 async def candles(
     symbol: str = Query(max_length=12),
-    timeframe: str = Query(default="1m", pattern=r"^(1m|1d)$"),
+    timeframe: Timeframe = "1m",
     limit: int = Query(default=320, ge=10, le=500),
+    source: Source = "auto",
     service: AShareService = Depends(get_ashare_service),
 ):
     try:
-        return await service.candles(symbol, timeframe, limit)
+        return await service.candles(symbol, timeframe, limit, source=source)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except MarketUnavailable as exc:

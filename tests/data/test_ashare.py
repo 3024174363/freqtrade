@@ -162,11 +162,51 @@ async def test_sina_quote_parser_preserves_shares():
         await http.close()
 
 
-@pytest.mark.parametrize("timeframe", ["1m", "1d"])
-async def test_tencent_raw_endpoint_and_minutes(timeframe):
+@pytest.mark.parametrize("symbol,factor", [("000001.SH", 1), ("399001.SZ", 0.01)])
+async def test_sina_index_snapshot_volume_is_market_specific(symbol, factor):
+    item = instrument_for(symbol)
+    fields = [""] * 33
+    for index, value in {
+        0: "Index",
+        1: "11",
+        2: "10",
+        3: "12",
+        4: "13",
+        5: "10",
+        8: "12509",
+        9: "150000",
+        30: "2026-11-02",
+        31: "13:41:31",
+    }.items():
+        fields[index] = value
+    http = mock_http(
+        lambda request: httpx.Response(
+            200, content=f'var hq_str_{item.provider_code}="{",".join(fields)}";'.encode("gb18030")
+        )
+    )
+    try:
+        _, quote, _ = await SinaProvider(http).quote(item)
+        assert quote.volume == 12509 * factor
+    finally:
+        await http.close()
+
+
+@pytest.mark.parametrize(
+    "timeframe,field",
+    [
+        ("1m", "m1"),
+        ("5m", "m5"),
+        ("15m", "m15"),
+        ("30m", "m30"),
+        ("1h", "m60"),
+        ("1d", "day"),
+        ("1w", "week"),
+        ("1M", "month"),
+    ],
+)
+async def test_tencent_raw_endpoint_and_minutes(timeframe, field):
     def handler(request):
         assert "fqkline" not in request.url.path
-        field = "m1" if timeframe == "1m" else "day"
         assert f",{field}," in request.url.params["param"]
         return httpx.Response(
             200,
@@ -176,7 +216,9 @@ async def test_tencent_raw_endpoint_and_minutes(timeframe):
                         "qt": {"sh600519": tencent_fields()},
                         field: [
                             [
-                                "202611021341" if timeframe == "1m" else "2026-11-02",
+                                "202611021341"
+                                if field.startswith("m") and field != "month"
+                                else "2026-11-02",
                                 "10",
                                 "11",
                                 "12",
@@ -197,6 +239,49 @@ async def test_tencent_raw_endpoint_and_minutes(timeframe):
         assert bars[0].volume == 300
     finally:
         await http.close()
+
+
+@pytest.mark.parametrize(
+    "timeframe,scale", [("5m", "5"), ("15m", "15"), ("30m", "30"), ("1h", "60"), ("1d", "240")]
+)
+@pytest.mark.parametrize("symbol,factor", [("600519.SH", 1), ("510300.SH", 1), ("000001.SH", 0.01)])
+async def test_sina_candle_periods_and_volume_units(timeframe, scale, symbol, factor):
+    def handler(request):
+        assert request.url.params["scale"] == scale
+        assert request.url.params["symbol"] == instrument_for(symbol).provider_code
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "day": "2026-11-02" if timeframe == "1d" else "2026-11-02 15:00:00",
+                    "open": "10",
+                    "close": "11",
+                    "high": "12",
+                    "low": "9",
+                    "volume": "12509",
+                }
+            ],
+        )
+
+    http = mock_http(handler)
+    try:
+        item, bars, stamp = await SinaProvider(http).candles(instrument_for(symbol), timeframe, 320)
+        assert bars[0].volume == 12509 * factor
+        assert item.symbol == symbol and stamp is None
+    finally:
+        await http.close()
+
+
+@pytest.mark.parametrize("timeframe,date", [("1w", "2026-11-02"), ("1M", "2026-11-02")])
+def test_current_week_and_month_remain_unfinished_until_period_changes(
+    monkeypatch, timeframe, date
+):
+    monkeypatch.setattr(
+        "freqtrade.data.ashare.providers.now_shanghai", lambda: parse_time("20261104134131")
+    )
+    rows = [[date, "10", "11", "12", "9", "3"], ["2026-10-30", "10", "11", "12", "9", "3"]]
+    bars = normalize_candles(rows, timeframe, 100)
+    assert bars[0].complete and not bars[1].complete
 
 
 async def test_eastmoney_raw_parser_is_disabled_until_verified():
@@ -304,6 +389,94 @@ async def test_failed_primary_falls_back_with_real_provenance(service, failure):
     assert backup.calls == ["510300.SH"]
 
 
+async def test_manual_source_never_uses_other_provider_or_their_cache(service):
+    primary, backup = FakeProvider(), FakeProvider("sina")
+    service.providers = [primary, backup]
+    await service.quote("600519.SH")  # Fresh Tencent cache must not satisfy Sina.
+    response = await service.quote("600519.SH", source="sina")
+    assert response.meta.source == "sina" and response.meta.requested_source == "sina"
+    assert not response.meta.fallback_used
+    assert primary.calls == ["600519.SH"] and backup.calls == ["600519.SH"]
+    for key, entry in service.cache.items():
+        if key[-1] == "sina":
+            entry.expires = 0
+    backup.fail = TimeoutError()
+    response = await service.quote("600519.SH", source="sina")
+    assert response.meta.source == "sina" and response.meta.stale
+    assert len(primary.calls) == 1
+
+
+async def test_manual_source_failure_without_own_cache_does_not_fall_back(service):
+    primary, backup = FakeProvider(), FakeProvider("sina", fail=NoDataError("no_data"))
+    service.providers = [primary, backup]
+    await service.quote("600519.SH")
+    with pytest.raises(MarketUnavailable):
+        await service.quote("600519.SH", source="sina")
+    assert primary.calls == ["600519.SH"] and backup.calls == ["600519.SH"]
+
+
+async def test_manual_and_auto_inflight_results_do_not_cross(service):
+    primary, backup = FakeProvider(), FakeProvider("sina")
+    service.providers = [primary, backup]
+    automatic, manual = await asyncio.gather(
+        service.quote("600519.SH"), service.quote("600519.SH", source="sina")
+    )
+    assert automatic.meta.source == "tencent" and manual.meta.source == "sina"
+
+
+async def test_cached_provenance_tracks_request_mode(service):
+    primary, backup = FakeProvider(fail=TimeoutError()), FakeProvider("sina")
+    service.providers = [primary, backup]
+    automatic = await service.quote("600519.SH")
+    assert automatic.meta.fallback_used
+    manual = await service.quote("600519.SH", source="sina")
+    assert manual.meta.cached and not manual.meta.fallback_used
+    assert manual.meta.requested_source == "sina"
+    automatic = await service.quote("600519.SH")
+    assert automatic.meta.cached and automatic.meta.fallback_used
+
+
+async def test_invalid_manual_capabilities_skip_network(service):
+    primary, backup, disabled = FakeProvider(), FakeProvider("sina"), FakeProvider("eastmoney")
+    backup.timeframes = {"5m", "1d"}
+    disabled.enabled = False
+    service.providers = [primary, backup, disabled]
+    for source, timeframe in [("sina", "1m"), ("eastmoney", "1d"), ("unknown", "1d")]:
+        with pytest.raises(ValueError):
+            await service.candles("600519.SH", timeframe, 320, source=source)
+    assert not primary.calls and not backup.calls and not disabled.calls
+
+
+@pytest.mark.parametrize("timeframe", ["1w", "1M"])
+async def test_unfinished_long_period_replaced_without_duplicate(service, monkeypatch, timeframe):
+    monkeypatch.setattr(
+        "freqtrade.data.ashare.service.now_shanghai", lambda: parse_time("20261104134131")
+    )
+
+    class UpdatingProvider(FakeProvider):
+        timeframes = {"1w", "1M"}
+
+        async def candles(self, instrument, timeframe, limit):
+            date = "2026-11-02" if not self.calls else "2026-11-03"
+            self.calls.append((timeframe, limit))
+            bars = normalize_candles(
+                [["2026-10-30", "10", "11", "12", "9", "3"], [date, "10", "11", "12", "9", "3"]],
+                timeframe,
+                100,
+            )
+            return instrument, bars, None
+
+    provider = UpdatingProvider()
+    service.providers = [provider]
+    await service.candles("600519.SH", timeframe, 320)
+    for entry in service.cache.values():
+        entry.expires = 0
+    updated = await service.candles("600519.SH", timeframe, 320)
+    assert len(updated.candles) == 2
+    assert provider.calls == [(timeframe, 320), (timeframe, 320)]
+    assert not service.history
+
+
 async def test_exhausted_sources_return_stale_without_overwriting_success(service):
     primary = FakeProvider()
     service.providers = [primary]
@@ -327,7 +500,7 @@ async def test_no_data_and_invalid_parameters_do_not_become_server_error(service
     with pytest.raises(ValueError):
         await service.quote("000001")
     with pytest.raises(ValueError):
-        await service.candles("600519.SH", "5m", 320)
+        await service.candles("600519.SH", "2h", 320)
     assert len(primary.calls) == 1
 
 
