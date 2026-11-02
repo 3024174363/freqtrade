@@ -104,6 +104,7 @@ class FTJSONResponse(JSONResponse):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from freqtrade.data.ashare.service import AShareService
+    from freqtrade.data.hkshare.service import HKShareService
 
     # Startup logic
     if not ApiServer._message_stream:
@@ -111,9 +112,11 @@ async def lifespan(app: FastAPI):
         # as uvicorn
         ApiServer._message_stream = MessageStream()
     app.state.ashare_service = AShareService()
+    app.state.hkshare_service = HKShareService()
     try:
         yield
     finally:
+        await app.state.hkshare_service.close()
         await app.state.ashare_service.close()
     # Shutdown logic
     if ApiServer._message_stream:
@@ -214,6 +217,7 @@ class ApiServer(RPCHandler):
         from freqtrade.rpc.api_server.api_background_tasks import router as api_bg_tasks
         from freqtrade.rpc.api_server.api_backtest import router as api_backtest
         from freqtrade.rpc.api_server.api_download_data import router as api_download_data
+        from freqtrade.rpc.api_server.api_hkshare import router as api_hkshare
         from freqtrade.rpc.api_server.api_pair_history import router as api_pair_history
         from freqtrade.rpc.api_server.api_pairlists import router as api_pairlists
         from freqtrade.rpc.api_server.api_trading import router as api_trading
@@ -229,6 +233,11 @@ class ApiServer(RPCHandler):
         app.include_router(router_login, prefix="/api/v1", tags=["Auth"])
         app.include_router(
             api_ashare,
+            prefix="/api/v1",
+            dependencies=[Depends(http_basic_or_jwt_token)],
+        )
+        app.include_router(
+            api_hkshare,
             prefix="/api/v1",
             dependencies=[Depends(http_basic_or_jwt_token)],
         )

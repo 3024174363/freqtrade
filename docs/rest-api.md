@@ -137,6 +137,48 @@ exchange holiday calendar.
 For the matching frontend and Docker development environment, see
 [`qr-workspace/RESTORE.md`](https://github.com/3024174363/freqtrade/blob/qr-dev/qr-workspace/RESTORE.md).
 
+## QR Hong Kong market data
+
+The `qr-dev` branch also supplies Tencent Hong Kong quotes and native unadjusted
+daily, weekly and monthly candles to the matching frontend's **港股** Chart tab.
+These endpoints use the existing Basic/JWT authentication and require no exchange,
+strategy or trading process.
+
+| Endpoint | Parameters | Purpose |
+| --- | --- | --- |
+| `GET /api/v1/hkshare/capabilities` | None | Only verified intervals `1d`, `1w`, `1M`, HKD and Tencent |
+| `GET /api/v1/hkshare/search` | `q` (up to 80 characters) | Name/code lookup; empty query returns saved instruments |
+| `GET /api/v1/hkshare/quote` | `symbol` | Price, change, daily OHLC, volume and amount |
+| `GET /api/v1/hkshare/candles` | `symbol`, `timeframe=1d`, `limit=320` (10–500) | Native daily/weekly/monthly OHLCV and coverage |
+
+Numeric codes normalize to five digits plus `.HK`; `700`, `hk00700` and
+`HK.00700` identify Tencent Holdings. `HSI.HK` and `HSTECH.HK` identify the two
+verified indices; Futu numeric index identifiers are not used. Snapshot identity,
+security type and currency are checked for every returned instrument. Search
+suggestions are batch-verified because Tencent can label ETFs as stocks.
+Only HKD stocks and ETFs plus those two indices are supported. Warrants, callable
+bull/bear contracts, REITs and non-HKD counters are excluded; unsupported
+instruments return 422.
+
+Stock volumes are shares, ETF volumes are fund units and amounts are HKD, without
+the A-share multipliers. Index volume and amount have unverified upstream units,
+so both are `null`; metadata includes an explanatory `volume_note`. Index prices
+represent points. All timestamps use `Asia/Hong_Kong`; candle dates represent the
+provider's trading date, and `complete=false` conservatively marks the current
+day/week/month. Each refresh replaces the entire candle window, deduplicating
+weeks/months by period rather than appending moving dates. Short histories return
+their actual coverage and `complete=false` on the response's requested-count flag.
+
+Metadata reports Tencent as the actual/requested source, currency, timezone,
+unadjusted prices, data/fetch time, cache state and session clock. There is no
+fallback provider. Bounded in-memory caching (256 entries), coalescing, HTTP
+connection reuse, throttling, total timeouts and 30-second failure cooldowns bound
+upstream traffic. Quote/candle/search TTLs are 3 seconds / 15 seconds / 6 hours.
+Failed updates retain a successful cached response with `stale=true` and a warning;
+without one, the API returns 503. Invalid symbols, counts and unsupported periods
+return 422. There is no persistent historical database, verified intraday OHLCV,
+complete holiday calendar or guaranteed real-time latency.
+
 ## Rest API
 
 ### Consuming the API

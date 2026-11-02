@@ -1,4 +1,4 @@
-# QR 开发环境与 A 股图表
+# QR 开发环境与 A 股、港股图表
 
 本目录保存 QR 根目录的开发环境文件。前后端分别使用 `freqtrade` 与 `frequi` Fork 的 `qr-dev` 分支；恢复目录和首次启动步骤见 [RESTORE.md](RESTORE.md)。
 
@@ -53,13 +53,36 @@ GET /api/v1/ashare/quote?symbol=600519.SH&source=sina
 GET /api/v1/ashare/candles?symbol=600519.SH&timeframe=30m&limit=320&source=sina
 ```
 
+## 港股 Chart
+
+在 Chart 顶部选择 **港股**，沿用现有登录。默认腾讯控股，可搜索中文名称、数字代码（`700`、`02800`）或完整代码（`02800.HK`、`HSI.HK`、`HSTECH.HK`），也接受 `hk00700` 与 `HK.00700` 格式。常用列表包含腾讯控股、阿里巴巴、盈富基金、恒指、恒生科技。
+
+- 报价和原生日 K、周 K、月 K 均来自腾讯。周期列表只提供已验证的这 3 种，不使用缺少完整 OHLCV 的分钟分时。默认最多 320 根，接口可请求 10～500 根；上游不足时返回实际覆盖。
+- 香港时间、不复权、红涨绿跌。港元柜台股票量为股、ETF 为份，成交额为港元，不套用 A 股倍率。指数显示点位，成交量及成交额因口径未核清显示缺失并说明。
+- 搜索批量核验腾讯快照的证券类型和币种，修正 ETF 的搜索标签；过滤窝轮、牛熊证、REITs 和非港元柜台。指数当前只开放已验证的恒指和恒生科技。
+- 报价在香港连续交易时段约 5 秒刷新，K 线约 60 秒；午休、收盘、周末约 60 秒检查。没有完整节假日日历或已核定的盘中延迟，请以行情时间为准。可手动刷新或关闭自动刷新。
+- 每次整体替换当前 K 线窗口，周/月按周期去重，避免未完成周期日期变化后重复。复用 A 股图表的缩放、拖动和十字光标，刷新保留缩放。
+- 市场切换重新创建面板，停止旧轮询并取消请求；标的、周期和连接切换也忽略旧响应。隐藏页面暂停自动请求，刷新失败保留最近成功数据，不将 Bot 标成离线。
+- 复用 HTTPX 连接和限频、一次临时连接错误重试、总超时和约 30 秒故障冷却。快照缓存 3 秒、K 线 15 秒、搜索 6 小时，最多 256 项内存缓存，合并重复请求，重启清空；没有持久历史数据库。
+
+港股接口沿用现有 Basic / JWT 认证，不依赖交易所或策略：
+
+```text
+GET /api/v1/hkshare/capabilities
+GET /api/v1/hkshare/search?q=腾讯
+GET /api/v1/hkshare/quote?symbol=02800.HK
+GET /api/v1/hkshare/candles?symbol=HSI.HK&timeframe=1w&limit=320
+```
+
+实现位于后端 `freqtrade/data/hkshare/`、`rpc/api_server/api_hkshare.py`，前端复用 `AShareChartView.vue`、`AShareCandleChart.vue` 和 `useAShareChart.ts` 的市场配置。只提供行情查看，不提供港股交易、策略或回测。恢复时需同时使用前后端 Fork 的 `qr-dev` 分支。
+
 ## 开发与验证
 
 后端修改 Python 后执行 `docker compose restart backend`。依赖变更需要重新构建镜像；editable 安装使用 `--no-deps`。前端源码绑定挂载，Vite 自动刷新；Node 依赖保存在 Docker 卷中。
 
 ```powershell
 docker compose exec backend python /workspace/scripts/check_environment.py
-docker compose exec backend pytest tests/data/test_ashare.py tests/rpc/test_api_ashare.py -q
+docker compose exec backend pytest tests/data/test_ashare.py tests/data/test_hkshare.py tests/rpc/test_api_ashare.py tests/rpc/test_api_hkshare.py -q
 docker compose exec frontend pnpm run typecheck
 docker compose exec frontend pnpm run build
 docker compose exec frontend pnpm test:unit --run
@@ -69,4 +92,8 @@ docker compose exec frontend pnpm test:unit --run
 
 同日扩展周期与手动选源后，前端累计 68 项测试、后端相关 93 项测试通过，类型检查、构建和修改文件静态检查通过。股票 / 指数 / ETF 分别验证了腾讯 8 个周期与新浪 5 个周期；手动选源、来源状态、不支持周期切换、失败保留所选源数据及缩放保持已在浏览器验证。手动改选周期后会清除此前的自动切换提示。新浪指数快照按沪深市场分别转换成交量，K 线统一从股转换为汇总手数；深市指数的不同源统计范围仍可能不同。
 
-北交所、B 股、可转债、场外基金和 A 股下单 / 回测 / 策略不在当前范围。不要把 `user_data`、密码、日志或行情结果同步到 Git。
+同日港股接入后，前端全套 79 项测试、后端 A 股与港股相关 154 项测试、API 生命周期与登录回归 8 项测试通过；类型检查、构建和修改文件静态检查通过。全前端 lint 无错误，既有未修改文件存在大量 CRLF 格式告警。Windows 挂载把 Python 文件统一暴露为可执行，容器内 Ruff 检查仅忽略 EXE002；Git 文件模式仍为 100644。
+
+腾讯真实接口经后端直连和前端代理分别验证了腾讯控股、阿里巴巴、盈富基金、恒指、恒生科技的报价及日/周/月 K、搜索、证券类型和单位、认证和无效参数。浏览器验证了 ETF 份数、指数缺失量额、恒生科技月 K 仅 77 根时的数量提示、刷新保留缩放、失败保留数据、三个市场切换后旧请求停止，以及 390 像素窄屏无横向溢出。盘中实际延迟与多交易日稳定性未验收。
+
+北交所、B 股、可转债、场外基金和股票市场下单 / 回测 / 策略不在当前范围。不要把 `user_data`、密码、日志或行情结果同步到 Git。
