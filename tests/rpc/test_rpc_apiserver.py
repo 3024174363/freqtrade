@@ -207,6 +207,54 @@ def test_api_ui_version(botclient, mocker):
     assert rc.json()["version"] == "0.1.2"
 
 
+@pytest.mark.parametrize("enable_ui", [None, True, False])
+def test_api_ui_configuration(default_conf, mocker, enable_ui):
+    default_conf["api_server"] = {
+        "enabled": True,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8080,
+        "enable_openapi": True,
+        "jwt_secret_key": _JWT_SECRET_KEY,
+        "username": _TEST_USER,
+        "password": _TEST_PASS,
+    }
+    if enable_ui is not None:
+        default_conf["api_server"]["enable_ui"] = enable_ui
+    mocker.patch("freqtrade.rpc.api_server.ApiServer.start_api")
+    apiserver = ApiServer(default_conf)
+    try:
+        with TestClient(apiserver.app) as client:
+            for path in (
+                "/",
+                "/trade",
+                "/assets/missing.js",
+                "/favicon.ico",
+                "/fallback_file.html",
+                "/ui_version",
+            ):
+                response = client.get(path)
+                if enable_ui is False:
+                    assert_response(response, 404, needs_cors=False)
+                    assert response.json() == {"detail": "Not Found"}
+                else:
+                    assert response.status_code == 200
+
+            assert client.get("/docs").status_code == 200
+            assert f"{BASE_URI}/ping" in client.get("/openapi.json").json()["paths"]
+            assert client.get(f"{BASE_URI}/ping").json() == {"status": "pong"}
+            assert client.get(f"{BASE_URI}/version").status_code == 401
+            login = client.post(f"{BASE_URI}/token/login", auth=(_TEST_USER, _TEST_PASS))
+            assert login.status_code == 200
+            response = client.get(
+                f"{BASE_URI}/version",
+                headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+            )
+            assert response.status_code == 200
+            assert response.json() == {"version": __version__}
+    finally:
+        ApiServer.shutdown()
+
+
 def test_api_auth():
     with pytest.raises(ValueError):
         create_token({"identity": {"u": "Freqtrade"}}, _JWT_SECRET_KEY, token_type="NotATokenType")

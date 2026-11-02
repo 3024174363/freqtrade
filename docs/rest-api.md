@@ -42,6 +42,12 @@ This should return the response:
 
 All other endpoints return sensitive info and require authentication and are therefore not available through a web browser.
 
+To use a separately hosted frontend, set `api_server.enable_ui` to `false` to disable
+the built-in FreqUI routes, including static assets, the fallback page, and `/ui_version`.
+The REST API, WebSocket API, and OpenAPI documentation remain available independently.
+This setting defaults to `true`; `/docs` still requires `enable_openapi` to be enabled.
+Restart the backend after changing this setting.
+
 ### Security
 
 To generate a secure password, best use a password manager, or use the below code.
@@ -83,6 +89,38 @@ Make sure that the following 2 lines are available in your docker-compose file:
 !!! Danger "Security warning"
     By using `"8080:8080"` (or `"0.0.0.0:8080:8080"`) in the docker port mapping, the API will be available to everyone connecting to the server under the correct port, so others may be able to control your bot.
     This **may** be safe if you're running the bot in a secure environment (like your home network), but it's not recommended to expose the API to the internet.
+
+## QR A-share market data
+
+The `qr-dev` branch provides read-only Shanghai/Shenzhen stock, index and ETF
+market data independently of the cryptocurrency exchange and strategy engine.
+All endpoints below use the existing HTTP Basic or JWT authentication:
+
+```text
+GET /api/v1/ashare/capabilities
+GET /api/v1/ashare/search?q=000001
+GET /api/v1/ashare/quote?symbol=600519.SH
+GET /api/v1/ashare/candles?symbol=600519.SH&timeframe=1m&limit=320
+```
+
+Use qualified symbols to distinguish `000001.SH` (Shanghai Composite) from
+`000001.SZ` (Ping An Bank). Supported candle intervals are `1m` and `1d`, with
+10 to 500 rows per request. Responses report the actual provider, raw price
+adjustment, volume unit, market timestamp, fetch time, cache status and coverage.
+Stock volume is in shares, ETF volume in fund units, and index volume retains
+the provider's aggregate lot convention. Minute timestamps identify interval ends.
+
+Snapshots try Tencent then Sina; candles currently use Tencent. The Eastmoney
+candle adapter is disabled until its live endpoints and units can be verified
+in this environment. Bounded in-memory caches, request coalescing, timeouts and
+provider cooldowns limit upstream traffic. Failed refreshes return the last
+successful response with `stale=true` when available, otherwise HTTP 503.
+Invalid symbols or unsupported intervals return HTTP 422. Public feeds have no
+guaranteed latency; the session label uses Beijing time of day, without a complete
+exchange holiday calendar.
+
+For the matching frontend and Docker development environment, see
+[`qr-workspace/RESTORE.md`](https://github.com/3024174363/freqtrade/blob/qr-dev/qr-workspace/RESTORE.md).
 
 ## Rest API
 

@@ -771,6 +771,11 @@ CONF_SCHEMA = {
             "type": "object",
             "properties": {
                 "enabled": {"description": "Whether the API server is enabled.", "type": "boolean"},
+                "enable_ui": {
+                    "description": "Whether the API server serves the built-in FreqUI.",
+                    "type": "boolean",
+                    "default": True,
+                },
                 "listen_ip_address": {
                     "description": "IP address the API server listens on.",
                     "format": "ipv4",

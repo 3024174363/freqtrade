@@ -103,12 +103,18 @@ class FTJSONResponse(JSONResponse):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from freqtrade.data.ashare.service import AShareService
+
     # Startup logic
     if not ApiServer._message_stream:
         # Creates the MessageStream class on startup so it has access to the same event loop
         # as uvicorn
         ApiServer._message_stream = MessageStream()
-    yield
+    app.state.ashare_service = AShareService()
+    try:
+        yield
+    finally:
+        await app.state.ashare_service.close()
     # Shutdown logic
     if ApiServer._message_stream:
         ApiServer._message_stream = None
@@ -203,6 +209,7 @@ class ApiServer(RPCHandler):
 
     def configure_app(self, app: FastAPI, config):
         from freqtrade.rpc.api_server.api_analysis import router_lookahead, router_recursive
+        from freqtrade.rpc.api_server.api_ashare import router as api_ashare
         from freqtrade.rpc.api_server.api_auth import http_basic_or_jwt_token, router_login
         from freqtrade.rpc.api_server.api_background_tasks import router as api_bg_tasks
         from freqtrade.rpc.api_server.api_backtest import router as api_backtest
@@ -220,6 +227,11 @@ class ApiServer(RPCHandler):
         app.include_router(api_v1_public, prefix="/api/v1")
 
         app.include_router(router_login, prefix="/api/v1", tags=["Auth"])
+        app.include_router(
+            api_ashare,
+            prefix="/api/v1",
+            dependencies=[Depends(http_basic_or_jwt_token)],
+        )
         app.include_router(
             api_v1,
             prefix="/api/v1",
@@ -279,8 +291,9 @@ class ApiServer(RPCHandler):
             dependencies=[Depends(http_basic_or_jwt_token), Depends(is_webserver_mode)],
         )
         app.include_router(ws_router, prefix="/api/v1")
-        # UI Router MUST be last!
-        app.include_router(router_ui, prefix="")
+        if config["api_server"].get("enable_ui", True):
+            # UI Router MUST be last!
+            app.include_router(router_ui, prefix="")
 
         app.add_middleware(
             CORSMiddleware,

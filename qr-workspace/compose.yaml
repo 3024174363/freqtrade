@@ -1,0 +1,55 @@
+name: qr-dev
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: qr-freqtrade-dev:2026.10
+    init: true
+    restart: unless-stopped
+    working_dir: /workspace/freqtrade
+    environment:
+      FREQTRADE__API_SERVER__ENABLE_UI: "false"
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - ./freqtrade:/workspace/freqtrade
+      - ./user_data:/freqtrade/user_data
+      - ./scripts:/workspace/scripts:ro
+    command:
+      - webserver
+      - --config
+      - /freqtrade/user_data/config.json
+      - --logfile
+      - /freqtrade/user_data/logs/webserver.log
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/ping', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    image: qr-frequi-dev:3.2.1
+    init: true
+    restart: unless-stopped
+    working_dir: /workspace/frequi
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./frequi:/workspace/frequi
+      - ./docker/vite.config.mts:/workspace/frequi/vite.qr.config.mts:ro
+      - frontend_modules:/workspace/frequi/node_modules
+      - pnpm_store:/pnpm/store
+    command: ["sh", "-c", "pnpm install --frozen-lockfile && pnpm exec vite --config vite.qr.config.mts --host 0.0.0.0 --port 5173 --strictPort"]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  frontend_modules:
+  pnpm_store:

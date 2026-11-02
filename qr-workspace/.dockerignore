@@ -1,0 +1,8 @@
+**/.git
+**/node_modules
+**/__pycache__
+freqtrade/freqtrade/rpc/api_server/ui/installed
+user_data
+reports
+.env
+freqtrade-clone-incomplete
